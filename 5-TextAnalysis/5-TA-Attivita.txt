@@ -1,0 +1,387 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# # Classification - Titanic
+# 
+# Simone Richetti, mat.129180, attività 5.
+
+# ### Traccia
+# Scaricare e studiare i dati sui passeggeri del Titanic disponibili su https://www.kaggle.com/c/titanic (scheda
+# “Data”). Quindi, risolvere il problema di “prevedere” la sopravvivenza o meno di ciascuno dei passeggeri in
+# base alle loro caratteristiche, usando un classificatore Naïve Bayes. In particolare, studiare quali feature usare
+# e come modellarle, scrivere il codice Python/NLTK e valutare l’accuratezza dei risultati ottenuti
+# (eventualmente, è possibile anche fare confronti di efficacia tra più “configurazioni”, es. diversi set di feature,
+# ecc.)
+
+# ### Dipendenze
+
+# In[1]:
+
+
+import pandas as pd
+import os
+import seaborn as sns
+from sklearn.naive_bayes import GaussianNB
+from sklearn.model_selection import cross_val_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.tree import DecisionTreeClassifier
+from IPython.display import display
+
+
+# ---
+
+# ## Exploratory Data Analysis
+# La competizione Kaggle indicata fornisce un training set su cui trainare e validare il nostro modello e un test set senza *groundtruth* su cui fare predizioni e da sottomettere per ottenere un rank nella competizione. 
+# 
+# Poichè questo ultimo aspetto non è di nostro interesse, importiamo solo il training set e ne studiamo la struttura:
+
+# In[2]:
+
+
+titanic_df = pd.read_csv(os.path.join('titanic-data', 'train.csv'))
+
+print(titanic_df.shape)
+print(titanic_df.columns)
+titanic_df.head()
+
+
+# Alcune informazioni sul dataset:
+# * *Survived*: è la feature che vogliamo predire, 1=sopravvissuto, 0=morto;
+# * *PClass*: classe del biglietto, prima, seconda o terza;
+# * *SibSp*: numero di fratelli/sorelle/coniugi a bordo;
+# * *Parch*: numero di genitori/figli a bordo;
+# * *Fare*: prezzo del biglietto;
+# * *Cabin*: identificativo della cabina, solo per la prima classe e pochissimi delle altre due classi;
+# * *Embarked*: porto da cui si sono imbarcati.
+# 
+# Utilizziamo ora alcune funzioni Pandas per ottenere dettagli sui valori contenuti nel dataset:
+
+# In[3]:
+
+
+titanic_df.describe()
+
+
+# In[4]:
+
+
+titanic_df.info()
+
+
+# Prima di scegliere una strategia per gestire i valori mancanti e effettuare le prime ipotesi su quali features sia opportuno scegliere, può essere interessante studiare la correlazione tra i dati di sopravvivenza e alcune colonne dal valore numerico (come l'età, le informazioni sui congiunti a bordo o la classe del biglietto):
+
+# In[5]:
+
+
+sns.heatmap(titanic_df.corr(), vmin=-1, vmax=1, linewidths=.005, linecolor='black',annot=True)
+
+
+# Possiamo osservare che per il momento non ci sono correlazioni forti tra le colonne del dataset. Le due correlazioni più forti legate alla colonna *Survived* sono quelle con la colonna *Fare* (correlazione positiva) e con la colonna *Pclass* (correlazione negativa), ma sono comunque correlazioni deboli, con un valore assoluto intorno a $0.3$. Allo stesso tempo, queste due colonne sono moderatamente correlate tra loro in maniera negativa (più bassa la classe, più alto il prezzo del biglietto). Possiamo concludere, quindi, che c'è una certa correlazione tra la qualità degli alloggi dei passeggeri sul Titanic e la loro probabilità di sopravvivenza: è una prima informazione da utilizzare nella nostra fase di *feature engineering* e *feature selection*.
+
+# ### Valori mancanti
+
+# In[6]:
+
+
+null_data = titanic_df[titanic_df.isnull().any(axis=1)]
+display(null_data)
+# Which columns have null values?
+print('Columns with missing values:', titanic_df.columns[titanic_df.isnull().any()].values)
+
+
+# Il porto di imbarco e la cabina probabilmente non sono informazioni molto determinanti ai fini della sopravvivenza. Possiamo quindi aggirare il problema dei dati mancanti per queste due colonne semplicemente non considerandole nella fase di definizione delle features. Lo stesso discorso non può valere per l'età, che possiamo supporre essere un'informazione chiave ai fini della classificazione. Quanti sono i record in cui manca l'età?
+
+# In[7]:
+
+
+titanic_df[ titanic_df['Age'].isnull()].shape[0]
+
+
+# Decisamente troppi per pensare di eliminare i record. Quello che si può fare è:
+# * Aggiungere un campo `age_missing`che vale 1 se l'età non è presente nel dataset, 0 altrimenti;
+# * Porre le età mancanti uguali all'età minima presente nel training set. Perchè proprio il minimo? Perchè negli algoritmi di *supervised machine learning* è sempre meglio avere valori bassi nelle proprie feature, per evitare di andare a creare delle forti asimmetrie di valori tra le diverse features. Il campo `age_missing` che abbiamo aggiunto servirà al classificatore ad imparare a dare meno peso al valore imputato.
+# 
+# ---
+
+# ## Feature encoding
+# 
+# In un primo esperimento, cerchiamo di utilizzare le seguenti colonne del dataset per predire la sopravvivenza:
+# * *Pclass*, che abbiamo visto essere correlata alla sopravvivenza, seppur debolmente;
+# * *Sex*, che possiamo ipotizzare essere un fattore importante;
+# * *Age*, come sopra;
+# * *Fare*, di cui abbiamo osservato una debole correlazione.
+# 
+# Quello che dobbiamo fare, quindi, è:
+# 1. Trasformare il genere in una feature numerica;
+# 2. Gestire i valori mancanti nella colonna dell'età come commentato sopra.
+# 3. Filtrare il dataset per le colonne interessate;
+
+# Sostituiamo ai valori *female* 1 e ai valori *male* 0:
+
+# In[8]:
+
+
+gender_encoding = {
+    'female': 1,
+    'male': 0
+}
+
+titanic_df['Sex'].replace(gender_encoding, inplace=True)
+titanic_df.head()
+
+
+# Creiamo una feature che indichi se l'età è mancante in un dato record e rimpiazziamo i dati mancanti con l'età minima presente nel dataset:
+
+# In[9]:
+
+
+min_age = titanic_df['Age'].min()
+
+titanic_df['age_missing'] = titanic_df['Age'].isnull().astype(int)
+display(titanic_df)
+
+titanic_df['Age'].fillna(min_age, inplace=True)
+display(titanic_df)
+
+
+# Controlliamo quindi che non ci siano valori mancanti e osserviamo la correlazione tra la sopravvivenza e la colonna ora numerica del genere e dell'età mancante:
+
+# In[10]:
+
+
+df1 = titanic_df[['Survived', 'Pclass', 'Sex', 'Age', 'Fare', 'age_missing']].copy(deep=True)
+
+
+# In[11]:
+
+
+df1.info()
+
+
+# In[12]:
+
+
+df1[['Survived', 'Sex', 'age_missing']].corr()
+
+
+# Sembra che ci sia una moderata correlazione tra il genere e la sopravvivenza, il che potrebbe essere indice di una buona feature. Siamo pronti per fare predizioni!
+# 
+# ---
+
+# ## Naive Bayes Classification
+
+# Per allenare e misurare le performance del modello Naive Bayes usiamo la tecnica di *5-folds cross validation*: il dataset viene diviso in 5 subset, il modello viene allenato 5 volte usando ogni volta 4 folds come training set e 1 fold come test set, a rotazione. Il pacchetto `sklearn` ci permette con una semplice chiamata a funzione di fare ciò.
+# 
+# Come modello utilizzeremo `sklearn.naive_bayes.GaussianNB`, il quale cerca di modellare la likelihood delle classi come una Gaussiana. 
+# 
+# > NOTA: Utilizziamo l'implementazione dell'algoritmo Naive Bayes di `sklearn` e non quella di `nltk` poichè la sua interfaccia ci permette di effettuare la cross validation e ci sarà più comoda nell'ultima sezione del notebook, quando testeremo questo algoritmo insieme ad altri algoritmi di machine learning. 
+# 
+# Una volta scelto il modello, è necessario scegliere quale misura considerare per valutarne le performance. Guardiamo com'è la distribuzione delle 2 classi all'interno del nostro dataset:
+
+# In[13]:
+
+
+df1['Survived'].value_counts(normalize=True)
+
+
+# Le classi sono ditribuite con un rapporto 62/38, al limite tra un dataset bilanciato ed uno sbilanciato. Possiamo comunque utilizzare la accuracy come misura della qualità delle nostre predizioni:
+
+# In[14]:
+
+
+y = df1['Survived']
+X_df1 = df1.drop('Survived', axis=1)
+display(X_df1.sample(5))
+
+
+# In[15]:
+
+
+naive_bayes = GaussianNB()
+scores = cross_val_score(naive_bayes, X_df1, y, cv=5)
+print(f'Naive Bayes Accuracy - df1: {sum(scores)/len(scores):.4f}')
+
+
+# Utilizzeremo questo risultato (accuracy del 76%) come *baseline* dei nostri esperimenti: cerchiamo ora di cambiare la nostra strategia per migliorare la soluzione ottenuta. I cambiamenti da apportare possono essere su due fronti:
+# 1. Utilizzare features diverse e strategie di features encoding differenti;
+# 2. Utilizzare altri algoritmi di apprendimento supervisionato.
+
+# ### Usare meno features
+# Talvolta, un alto numero di features dei dati può comportare *overfitting* su di essi. Proviamo a rimuovere le features legate a all'età, visto che non era emersa alcuna correlazione rilevante tra età e sopravvivenza:
+
+# In[16]:
+
+
+X_df2 = X_df1.drop(columns=['Age', 'age_missing'])
+display(X_df2.head())
+
+
+# In[17]:
+
+
+scores = cross_val_score(naive_bayes, X_df2, y, cv=5)
+print(f'Naive Bayes Accuracy - df2: {sum(scores)/len(scores):.4f}')
+
+
+# Rimuovere le features legate all'età ha permesso di migliorare leggermente l'accuracy del nostro modello (~1.5%), probabilmente poichè acquisisce una migliore capacità di generalizzare.
+
+# ## Usare più features
+# 
+# Possiamo provare ad utilizzare più informazioni sui nostri dati, in modo da osservare se queste informazioni possano aiutare il modello a fare predizioni migliori. Proviamo ad aggiungere al nostro dataset features legate a:
+# * Parenti a bordo;
+# * Porto di imbarco;
+# * Titolo del nominativo.
+
+# In[18]:
+
+
+df3 = titanic_df.copy(deep=True)
+df3 = titanic_df.drop(columns=['PassengerId', 'Survived', 'Ticket', 'Cabin'])
+df3.head()
+
+
+# #### Famiglia a bordo
+
+# In[19]:
+
+
+df3['Family_size'] = df3['SibSp'] + df3['Parch'] + 1
+df3.drop(columns=['SibSp', 'Parch'], inplace=True)
+df3.head()
+
+
+# #### Porto di imbarco
+
+# In[20]:
+
+
+print(f"Unique values for 'Embarked': {df3['Embarked'].unique()}")
+print(f"Number of missing values: {df3['Embarked'].isna().sum()}")
+
+
+# Prima di effettuare feature encoding, dobbiamo gestire i dati mancanti: essendo solo 2 i record per cui manca il valore di *Embarked*, possiamo identificare il porto da cui sono salpati il maggior numero di passeggeri e assegnare i dati mancanti ad esso:
+
+# In[21]:
+
+
+df3['Embarked'].value_counts()
+
+
+# In[22]:
+
+
+# 'S' is the most frequent value for the 'Embarked' columns, we fill na with this value
+df3['Embarked'].fillna('S', inplace=True)
+df3['Embarked'].value_counts()
+
+
+# Il metodo più corretto per effettuare l'encoding di una variabile categorica di questo tipo sarebbe il *One-Hot Encoding*, in quanto non esiste alcun tipo di ordinamento tra le diverse categorie (ovvero i diversi porti di imbarco). Tuttavia, una soluzione di questo tipo aumenterebbe di molto il numero di features del dataset e questo potrebbe causare overfitting, perciò utilizzeremo lo stesso un encoding ordinale:
+
+# In[23]:
+
+
+df3['Embarked'] = df3['Embarked'].map({'S': 0, 'C': 1, 'Q': 2}).astype(int)
+df3.head()
+
+
+# #### Titolo
+
+# In[24]:
+
+
+df3['Title'] = df3.Name.str.extract('([A-Za-z]+)\.', expand=False)
+df3['Title'].value_counts()
+
+
+# Con una semplice regular expression abbiamo estratto tutti i titoli dai nomi. Possiamo osservare che alcuni possono essere accorpati, ad esempio: *Mme*/*Mlle* (Madame/Mademoiselle) &#9654; *Miss*/*Mrs*. Inoltre, *Ms* e *Miss* sono lo stesso titolo espresso con abbreviazioni diverse.
+# 
+# Oltre a ciò, ci sono numerosi titoli che occorrono pochissime volte nel nostro dataset: possiamo creare un'unica categoria *Other* in cui facciamo rientrare tutti i titoli rari.
+
+# In[25]:
+
+
+df3['Title'] = df3['Title'].replace(['Lady', 'Countess','Capt', 'Col',                    'Don', 'Dr', 'Major', 'Rev', 'Sir', 'Jonkheer', 'Dona'], 'Other')
+
+df3['Title'] = df3['Title'].replace('Mlle', 'Miss')
+df3['Title'] = df3['Title'].replace('Ms', 'Miss')
+df3['Title'] = df3['Title'].replace('Mme', 'Mrs')
+df3.Title.value_counts()
+
+
+# Una volta raffinate le nostre categorie, effettuiamo un encoding ordinale per gli stessi motivi riportati per la colonna *Embarked*:
+
+# In[27]:
+
+
+df3['Title'] = df3['Title'].map({'Mr': 1, 'Miss': 2, 'Mrs': 3, 'Master': 4, 'Other': 5})
+df3.drop(columns='Name', inplace=True)
+df3.head()
+
+
+# Prima di passare al training, controlliamo che non ci siano *missing values*:
+
+# In[26]:
+
+
+df3.isna().sum()
+
+
+# #### Naive Bayes
+
+# In[28]:
+
+
+scores = cross_val_score(naive_bayes, df3, y, cv=5)
+print(f'Naive Bayes Accuracy - df3: {sum(scores)/len(scores):.5f}')
+
+
+# Ancora una volta, siamo riusciti a migliorare leggermente l'accuracy del modello, questa volta aggiungendo informazioni rilevanti per la classificazione.
+# 
+# ---
+
+# ## Utilizzare diversi modelli
+# 
+# Abbiamo visto come sia possibile migliorare la accuratezza delle predizioni lavorando sulle features del dataset. Ora proviamo a comparare i risultati di altri algoritmi di machine learning rispetto al Naive Bayes con cui abbiamo sperimentato finora. Utilizziamo alcuni algoritmi tra i più semplici e diffusi: 
+# * **Logistic Regression**: ricavata dallo stesso Naive Bayes per calcolare una probabilità a posteriori anzichè una likelihood, è un classificatore lineare;
+# * **Decision Tree**: un algoritmo di learning che allena un albero decisionale sui dati, molto semplice;
+# * **Random Forest**: un metodo di insieme che combina i risultati di tanti semplici alberi decisionali.
+
+# In[32]:
+
+
+datasets = [X_df1, X_df2, df3]
+algorithms = [
+    {'name': 'Naive Bayes', 'model': naive_bayes}, 
+    {'name': 'Logistic Regression', 'model': LogisticRegression(max_iter=200)},
+    {'name': 'Decision Tree', 'model': DecisionTreeClassifier()},
+    {'name': 'Random Forest', 'model': RandomForestClassifier(n_estimators=150)}
+]
+cols = ['Model Name', 'Baseline', 'Less Features', 'More Features']
+n_runs = 5  # Number of times we execute cross validation with a specific
+            # algorithm on a specific dataset
+
+summary = pd.DataFrame(columns=cols)
+for alg in algorithms:
+    row = [alg['name']]
+    
+    for X in datasets:
+        results = []
+        
+        # We train and test each model {n_runs} times and we compute the average score,
+        # in order to have more robust results
+        for _ in range(n_runs):
+            results.extend(cross_val_score(alg['model'], X, y, cv=5))
+        row.append(sum(results)/len(results))
+    summary = summary.append(pd.Series(data=row, index=cols), ignore_index=True)
+
+summary.set_index('Model Name', inplace=True)
+display(summary)
+
+
+# Si può osservare come questi algoritmi migliorino i risultati ottenuti in termini di accuracy rispetto al Naive Bayes:
+# * La *Logistic Regression*, poichè non modella la probabilità dei dati (ovvero la Likelihood) ma quella delle classi a partire dai dati (ovvero la probabilità a posteriori), è capace di gestire features più numerose e complesse in maniera più robusta all'overfitting, perciò fornisce le predizioni migliori sul dataset con più features (~81% di accuracy)
+# * Il *Decision Tree* è un algoritmo molto semplice e quindi a rischio overfitting, per questo performa al meglio sul dataset più semplice;
+# * Il *Random Forest* è senz'altro l'algoritmo più utilizzato e popolare poichè sfrutta la potenza dei metodi di insieme. Si può vedere come i risultati sui 3 dataset siano molto vicini tra di loro e migliori di quelli ottenuti dal Naive Bayes (>80%). Inoltre, sul dataset che abbiamo preso come baseline ottiene i risultati migliori tra tutti i modelli.
+# 
+# > NOTA: i 5 *folds* su cui sono allenati i modelli vengono generati in maniera random, quindi i risultati cambiano ad ogni run. Per questo motivo, i risultati ottenuti potrebbero leggermente differire da quelli ottenuti dall'autore e su cui si basano i commenti. Ogni modello viene allenato e testato per 5 volte su 5 folds, quindi 5*5 = 25 volte, e viene riportata nel sommario finale la media dei risultati ottenuti, proprio per avere un quadro più preciso dei risultati di ciascun algoritmo su ciascun dataset. Non si dovrebbero ottenere dunque risultati molto distanti da quelli commentati. È possibile aumentare il valore della variabile `n_runs` per aumentare il numero di run per ogni test, ottenendo risultati più robusti ma impiegandoci più tempo.

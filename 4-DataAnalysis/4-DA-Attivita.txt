@@ -1,0 +1,541 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# # Data processing e exploratory data anlytics | UNCOVER COVID-19
+# Simone Richetti, mat. 129180, attività 4.
+
+# ## Traccia
+# 
+# L’attività da svolgere consiste nel:
+# * Scegliere un dataset
+# * Usando PANDAS implementare le operazioni di data processing necessarie per mettere in correlazione i
+# dataset e per preparare i dati al passo successivo (join e selezioni)
+# * Usando pacchetti Python quali Pandas, scipy, matplotlib e sciborn implementare attività di exploratory data
+# analysis estraendo dati statistici e di visualizzazione dei risultati attraverso il quale sia possibile “raccontare
+# qualcosa sui dati” (storytelling), eventualmente partendo da dei quesiti di ricerca.
+# 
+# L’uso dei pacchetti non deve necessariamente essere limitato alle istruzioni viste a lezione.
+
+# ### Dataset e obiettivi
+# Il dataset scelto è stato preso dalla challenge Kaggle [UNCOVER COVID-19 Challenge](https://www.kaggle.com/roche-data-science-coalition/uncover) (cartella `ECDC/`) sulla diffusione del virus COVID-19 del mondo: esso contiene record giornalieri sul numero di nuovi casi e di morti dovuti al contagio in paesi di tutto il mondo.
+# 
+# Il notebook è diviso in 3 sezioni:
+# 1. **Data Exploration**: studio delle caratteristiche del dataset e data cleaning;
+# 2. **Data Analysis**: lo scopo è quello di studiare l'andamento del contagio e delle morti in relazione al tempo, ai continenti e alle singole nazioni;
+# 3. **Studio dell'impatto del COVID sulla salute mentale delle persone in Italia**: unendo i dati provenienti da un altro dataset (vedi la sezione per maggiori dettagli), mettere in correlazione il l'andamento del contagio e quello delle ricerche Internet legati a disturbi mentali in Italia.
+
+# ### Dipendenze
+
+# In[1]:
+
+
+import pandas as pd
+from IPython.display import display
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import seaborn as sns
+import numpy as np
+import scipy.stats as sci
+import os
+
+
+sns.set(style='darkgrid')
+
+
+# ---
+
+# ## Data Exploration
+
+# In[2]:
+
+
+df = pd.read_csv(os.path.join('data', 'current-data-on-the-geographic-distribution-of-covid-19-cases-worldwide.csv'))
+display(df)
+
+
+# #### Columns, rows, datatypes
+
+# In[3]:
+
+
+print(f'Columns: {df.columns}\n')
+print(f'Datatypes: {df.dtypes}\n')
+print(f'Number of rows: {df.size}\n')
+
+
+# Possiamo convertire la colonna `daterep` al tipo di dato `datetime64`:
+
+# In[4]:
+
+
+df['daterep'] = pd.to_datetime(df['daterep'])
+
+
+# #### Dati mancanti
+
+# In[5]:
+
+
+null_data = df[df.isnull().any(axis=1)]
+display(null_data)
+
+
+# Otteniamo maggiori informazioni sui dati mancanti:
+
+# In[6]:
+
+
+# Which countries are involved in missing values?
+null_data['countriesandterritories'].unique()
+
+
+# In[7]:
+
+
+# Which columns have null values?
+df.columns[df.isnull().any()]
+
+
+# Possiamo notare come i valori mancanti siano relativi a paesi molto piccoli o particolari, per i quali probabilmente non sono disponibili tutti i dati. Per i fini della nostra analisi non sono paesi determinanti, quindi per semplicità eliminiamo i record con valori mancanti:
+
+# In[8]:
+
+
+df = df.dropna()
+
+
+# #### Data summary e outliers
+
+# In[9]:
+
+
+df.describe()
+
+
+# Possiamo osservare che il minimo della colonna `cases` è negativo, e che quindi sono presenti valori negativi per quella colonna nel dataset. Sono outliers oppure hanno un significato particolare, ad esempio che in quel giorno i guariti sono stati più numerosi dei nuovi casi?
+
+# In[10]:
+
+
+potential_outliers = df['cases'] < 0
+df[potential_outliers]
+
+
+# Per capire meglio il senso di questi dati, possiamo osservare il loro intorno temporale, per vedere se sono in linea con quelli dei giorni adiacenti o sono discordanti con essi. Consideriamo i dati dell'Ecuador nel mese di Maggio:
+
+# In[11]:
+
+
+df[(df['countriesandterritories'] == 'Ecuador') & (df['month'] == 5)]
+
+
+# Il fatto che siano una decina righe del dataset su quasi 200k e il fatto che siano dati fortemente discordanti rispetto a quelli nel loro intorno temporale ci fanno supporre che i casi negativi siano outliers. Per non perdere le informazioni sulle morti di quei record, che invece possiamo supporre essere corrette, settiamo a 0 i nuovi casi in caso presentino un valore negativo:
+
+# In[12]:
+
+
+df.loc[df[ df['cases'] < 0 ].index, 'cases'] = 0
+print(df['cases'].describe())
+
+
+# ---
+
+# ## Data Analysis
+
+# ### Paesi considerati
+
+# In[13]:
+
+
+countries = pd.unique(df['countriesandterritories'])
+print(countries.size, '\n')
+print(countries)
+
+
+# In[14]:
+
+
+# We replace 'United_States_of_America' with 'USA', in order to have more compact plots later
+df['countriesandterritories'].replace(to_replace='United_States_of_America', 
+                                      value='USA', inplace=True)
+
+
+# ### Dati globali
+
+# Partiamo da un punto di vista globale e osserviamo quanti casi di COVID19 ci sono stati nel mondo e quante morti:
+
+# In[15]:
+
+
+min_date = df['daterep'].min()
+max_date = df['daterep'].max()
+total_cases = df['cases'].sum()
+total_deaths = df['deaths'].sum()
+print(' '*3 + 'COVID SUMMARY\n' + '='*19)
+print(f'Time period: {min_date} - {max_date}\n')
+print(f'Total cases in the world: {total_cases}')
+print(f'Total deaths in the world: {total_deaths}')
+
+
+# Osserviamo l'andamento globale del COVID nel mondo con l'avanzare del tempo:
+
+# In[16]:
+
+
+# Create a dataframe which reports the number of cases in the world for each day
+world_agg = df[['daterep', 'cases', 'deaths']].groupby('daterep', 
+                                                       as_index=False).sum()
+world_agg.sort_values(by='daterep')
+
+# Setup subplots
+dims = (20, 8)
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=dims)
+ax1.set_title("COVID19 cases in the world")
+ax2.set_title("COVID19 deaths in the world")
+ax1.set_xlabel('Date')
+ax2.set_xlabel('Date')
+ax1.set_ylabel('Number of cases per day')
+ax2.set_ylabel('Number of deaths per day')
+
+ax1.plot(world_agg['daterep'], world_agg['cases'])
+ax2.plot(world_agg['daterep'], world_agg['deaths'], color='red')
+plt.tight_layout()
+plt.show()
+
+
+# Osserviamo ora quali siano stati i continenti più colpiti ad oggi:
+
+# In[17]:
+
+
+# DataFrame con casi e morti totali per continenti
+cont_count = df[['continentexp', 'cases', 'deaths']].groupby('continentexp', 
+                                                             as_index=False).sum()
+# cont_count.rename({'continentexp': 'Continente', 'cases': 'Casi', 'deaths': 'Morti'}, inplace=True)
+
+f, axes = plt.subplots(1,2, figsize=[dim * 5 / 6 for dim in dims])
+ax1 = sns.barplot(x='continentexp', y='cases', data=cont_count, ax=axes[0])
+ax2 = sns.barplot(x='continentexp', y='deaths', data=cont_count, ax=axes[1])
+ax1.set(xlabel='Continent', ylabel='Cases')
+ax2.set(xlabel='Continent', ylabel='Deaths')
+plt.tight_layout()
+plt.show()
+
+
+# Come si può osservare, in America ci sono stati più casi ma in Europa un numero maggiore di morti. Sudiamo come si è evoluto il contagio nei due continenti durante il tempo con una heatmap:
+
+# In[18]:
+
+
+subset = df[(df['continentexp'] == 'America')|(df['continentexp'] == 'Europe')]
+subset = subset[['continentexp', 'daterep', 'cases']]
+subset = subset.groupby(by=['continentexp', 'daterep'], 
+                        as_index=False).cases.sum()
+
+plt.figure(figsize=(8, 10))
+subset = subset.pivot_table(index='daterep', columns='continentexp', 
+                            values='cases')
+ax = sns.heatmap(data=subset)
+ax.set(xlabel='Continent', ylabel='Date')
+plt.tight_layout()
+plt.show()
+
+
+# Si può osservare come il contagio in America sia iniziato più di una settimana dopo rispetto all'Europa. Nonostante abbia raggiunto picchi più alti, probabilmente il fatto che sia iniziato dopo ha permesso di reagire in maniera più pronta al virus.
+# 
+# Inoltre, sarebbe significativo rapportare queste informazioni alla popolosità di ciascun continente, in modo avere una visione più precisa dell'incisività della malattia nei due continenti:
+
+# In[19]:
+
+
+cont_pop_df = df[['continentexp', 'popdata2018', 'countryterritorycode', 'cases', 'deaths']].drop_duplicates()
+cont_pop_df = cont_pop_df.groupby(by='continentexp', as_index=False).sum()
+
+cont_pop_df['cases-pop-ratio'] = cont_pop_df['cases'] / cont_pop_df['popdata2018']
+cont_pop_df['deaths-pop-ratio'] = cont_pop_df['deaths'] / cont_pop_df['popdata2018']
+display(cont_pop_df)
+
+
+# In[20]:
+
+
+f, axes = plt.subplots(1,2, figsize=[dim * 5 / 6 for dim in dims])
+ax1 = sns.barplot(x='continentexp', y='cases-pop-ratio', 
+                  data=cont_pop_df, ax=axes[0])
+ax2 = sns.barplot(x='continentexp', y='deaths-pop-ratio', 
+                  data=cont_pop_df, ax=axes[1])
+ax1.set(xlabel='Continent', ylabel='Cases/pop. ratio')
+ax2.set(xlabel='Continent', ylabel='Deaths/pop. ratio')
+plt.tight_layout()
+plt.show()
+
+
+# Rapportando i casi e le morti alla popolazione dei continenti diventa evidente come l'evoluzione del contagio sia simile tra Europa e America ma come l'incisività nel primo in termini di morti sia stata maggiore.
+
+# ### Informazioni sui paesi
+
+# ##### Paesi più colpiti, in termini assoluti e in rapporto alla popolazione:
+
+# In[21]:
+
+
+country_df = df[['countriesandterritories', 'cases', 'deaths', 'popdata2018']].copy()
+abs_data_df = country_df.drop(columns='popdata2018').groupby('countriesandterritories',as_index=False).sum()
+
+# Extract the 6 countries with the highest number of cases for a later plot
+most_cases_countries = abs_data_df.sort_values(by='cases', ascending=False).head(6)['countriesandterritories'].values
+
+# Absolute number of cases (top-left)
+sixnin = (16,9)
+_, axes = plt.subplots(2, 2, figsize=sixnin)
+ax1 = sns.barplot(
+    x='countriesandterritories', 
+    y='cases', 
+    data=abs_data_df.sort_values(by='cases', ascending=False).head(10), 
+    ax=axes[0, 0])
+ax1.set(ylabel='Cases')
+
+# Absolute number of deaths (top-right)
+ax2 = sns.barplot(
+    x='countriesandterritories', 
+    y='deaths', 
+    data=abs_data_df.sort_values(by='deaths', ascending=False).head(10), 
+    ax=axes[0, 1])
+ax2.set(ylabel='Deaths')
+
+# Compute cases/pop and deaths/pop ratio for each country. We choose only 
+# countries with a populoation greater than 1M because little countries tend to
+# have a very high ratio
+country_df = country_df[ country_df['popdata2018'] >= 1000000 ] 
+country_df['cases-pop-ratio'] = country_df['cases'] / country_df['popdata2018']
+country_df['deaths-pop-ratio'] = country_df['deaths'] / country_df['popdata2018']
+ratio_data_df = country_df.drop(columns=['popdata2018', 'cases', 'deaths']).groupby('countriesandterritories',as_index=False).sum()
+
+# Cases/population ratio (bottom-left)
+ax3 = sns.barplot(
+    x='countriesandterritories', 
+    y='cases-pop-ratio', 
+    data=ratio_data_df.sort_values(by='cases-pop-ratio', ascending=False).head(10),
+    ax=axes[1, 0])
+ax3.set(ylabel='Cases/population ratio')
+
+# Deaths/population ratio (bottom-left)
+ax4 = sns.barplot(
+    x='countriesandterritories', 
+    y='deaths-pop-ratio', 
+    data=ratio_data_df.sort_values(by='deaths-pop-ratio', ascending=False).head(10),
+    ax=axes[1, 1])
+ax4.set(ylabel='Deaths/population ratio')
+
+for ax in [ax1, ax2, ax3, ax4]:
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=30, ha="right")
+    ax.set(xlabel='Country')
+plt.tight_layout()
+plt.show()
+
+
+# ##### Andamento della malattia per paese nel tempo:
+
+# In[22]:
+
+
+print(f'Countries with the highest number of cases: {most_cases_countries}')
+
+
+# Osserviamo che la Cina non è tra i dieci paesi per numero di casi più alto, ma è comunque interessante osservare l'andamento temporale del contagio in Cina rispetto alle altre nazioni. La aggiungiamo, quindi, alla lista dei paesi che vogliamo visualizzare:
+
+# In[23]:
+
+
+most_cases_countries = np.append(most_cases_countries, 'China')
+
+
+# In[24]:
+
+
+# Build the desired view for the plot: date and cases for the selected countries
+country_view = df[ df['countriesandterritories'].isin(most_cases_countries) ]
+country_view = country_view[['daterep', 'cases', 'countriesandterritories']]
+display(country_view)
+
+
+# In[25]:
+
+
+fig, ax = plt.subplots(figsize=sixnin)
+sns.lineplot(x='daterep', y='cases', hue='countriesandterritories', 
+             data=country_view, ax=ax);
+plt.tight_layout()
+plt.show()
+
+
+# Possiamo osservare come il contagio in Cina sia iniziato molto prima che in tutto il resto del mondo: a seguire è arrivato nell'Europa continentale (Spagna e Italia nel grafico), quindi negli USA in cui, anche a causa dell'alta popolosità, ha raggiunto livelli maggiori che in qualsiasi altro paese. Tra gli ultimi paesi vittime del contagio possiamo osservare Russia e Brasile, in cui il contagio non si è ancora arrestato.
+
+# ---
+
+# ## Impatto del COVID sulla salute mentale delle persone in Italia
+
+# In questa terza ed ultima sezione, sfruttiamo i dati appena utilizzati unitamente a quelli di un altro dataset Kaggle, [COVID-19 and Mental Health Search Terms](https://www.kaggle.com/luckybro/mental-health-search-term) (`search-term-italy.xlsx`). Quest'ultimo dataset contiene informazioni sulla frequenza delle ricerche di termini legati a patologie e disturbi mentali in un periodo di tempo che va da Giugno 2019 a fine Maggio 2020. I dati sono relativi all'Italia.
+# 
+# Riporto la descrizione del dataset:
+# 
+# >The mental health related search terms are "mental health", "depression", "anxiety", "ocd", "obsessive compulsive disorder", "insomnia", "panic attack", "counseling", "psychiatrist".
+# >
+# >Search interest is indicated by a number between 0 and 100, where 100 means the most popular point of time(by week), 1 means the least, and 0 no enough data.
+# >
+# >All data is collected from Google Trends. I assumed, when searching the terms, users from countries other than English-speaking performed the search in their own language, and they typed the word correctly.
+# 
+# Lo scopo della nostra analisi è quello di riuscire ad incrociare le informazioni dei due dataset per cercare informazioni sulla correlazione tra la ricerca di questi termini e l'andamento del contagio.
+
+# In[26]:
+
+
+mh_df = pd.read_csv(os.path.join('data', 'search_term_italy.csv'), delimiter=';')
+display(mh_df.head())
+display(mh_df.tail())
+
+
+# In[27]:
+
+
+display(mh_df.describe())
+
+
+# Osserviamo dal riassunto di Pandas che i dati sono coerenti: nessun valore mancante, nessun valore negativo, tutti i campi contengono valori che vanno da 0 a 100. Il range temporale coperto dai dataset è il seguente:
+
+# In[28]:
+
+
+mh_df['Week'] = pd.to_datetime(mh_df['Week'], format='%d/%m/%Y')
+first_week = mh_df['Week'].min()
+last_week = mh_df['Week'].max()
+print(f'COVID dataset time range: {min_date} - {max_date}\n')
+print(f'Mental health dataset time range: {first_week}-{last_week}')
+
+
+# Preso nota del formato dei dati e del periodo di tempo coperto, il *workflow* che si intende mettere in pratica è il seguente:
+# 1. Filtrare dataset COVID considerando solo casi in Italia
+# 2. Raggruppare i dati del contagio in settimane
+# 3. Effettuare join tra dataset
+# 4. Calcolare correlazione tra COVID e ricerche
+
+# ### Data Preparation
+
+# Filtro dataset COVID considerando solo casi in Italia:
+
+# In[29]:
+
+
+italy_view =     df[ df['countriesandterritories'] == 'Italy' ].sort_values(by='daterep')
+italy_view = italy_view[['daterep', 'cases', 'deaths']]
+display(italy_view)
+
+
+# Raggruppo i dati del contagio in settimane:
+
+# In[30]:
+
+
+italy_week_view = italy_view.groupby(pd.Grouper(key='daterep', freq='W')).sum()
+display(italy_week_view)
+
+
+# Join tra i due dataset basato sulla *week* dei record:
+
+# In[31]:
+
+
+# In order to perform a join, week has to be the index in the mental health 
+# dataset:
+mh_df = mh_df.set_index('Week')
+
+agg_df = mh_df.join(italy_week_view)
+display(agg_df.head(), agg_df.tail())
+
+
+# Eliminiamo l'ultimo record poichè non abbiamo informazioni sui contagi in quel periodo e sostituiamo i NaN presenti con 0 poichè, appunto, si riferiscono a periodi in cui il COVID non era ancora presente in Italia.
+
+# In[32]:
+
+
+agg_df.drop(agg_df.tail(1).index,inplace=True)
+# The mental health dataset considers a wider timnescale then the COVID dataset.
+# It is better to remove some of the first rows to avoid the influence of past 
+# events: this would invalidate our correlation measure
+agg_df.drop(agg_df.head(20).index,inplace=True)
+agg_df.fillna(0, inplace=True)
+display(agg_df.head(), agg_df.tail())
+
+
+# ### Data Analysis: studio delle correlazioni
+
+# Osserviamo il valore della Pearson's Correlation tra le colonne del nostro DataFrame. Ricordiamo che la Pearson's Correlation è calcolata come:
+# $$cor(x,y) = \frac{cov(x,y)}{sd(x)sd(y)}$$
+# dove $cov$ indica la covarianza tra le due variabili e $sd$ la deviazione standard della singola variabile. Essa è un valore sempre compreso tra $[-1,1]$, dove gli estremi rappresentano una correlazione perfetta, il segno rappresenta se sia una correlazione diretta o inversa e lo $0$ rappresenta una totale assenza di correlazione:
+
+# In[33]:
+
+
+fig, ax = plt.subplots(figsize=(10,8))
+sns.heatmap(data=agg_df.corr(), linewidths=.01, linecolor='black', ax=ax, 
+            annot=True, vmin=-1, vmax=1)
+plt.tight_layout()
+plt.show()
+
+
+# Dalla *heatmap* si può osservare che:
+# * "Ansia", "insonnia" e "attacchi di panico" sono ricerche positivamente e moderatamente correlate al numero di casi e di morti legati al COVID-19;
+# * La ricerca di psichiatri è negativamente correlata al contagio in maniera forte, probabilmente perchè durante le misure di lockdown non era possibile goderne dei servizi;
+# * Le ricerche legate ai disturbi ossessivo-compulsivi sono quasi totalmente scorrelate al contagio. Questo è ragionevole, poichè non è un problema mentale le cui cause sono direttamente riconducibili al fenomeno del contagio. Lo stesso vale per le ricerche "salute mentale" e "consulenza", probabilmente perchè sono termini di ricerca molto vaghi;
+# * Stranamente, la depressione è correlata negativamente al fenomeno del COVID, quando ci si potrebbe aspettare il contrario. Questo potrebbe essere legato al fatto che è un termine ampiamente utilizzato e molto spesso abusato nel linguaggio comune, per cui il numero di ricerche anche nel periodo precedente al COVID doveva essere sicuramente molto alto, risultando quindi in una correlazione negativa.
+# 
+# Proviamo ad approfondire le correlazioni tra COVID e depressione ed ansia, mediante degli *scatter plot* e osservando l'andamento delle ricerche nel tempo:
+
+# In[34]:
+
+
+fig, axes = plt.subplots(1,2, figsize=sixnin)
+sns.scatterplot(x='cases', y='anxiety', data=agg_df, ax=axes[0])
+sns.scatterplot(x='cases', y='depression', data=agg_df, ax=axes[1])
+plt.tight_layout()
+plt.show()
+
+
+# In[35]:
+
+
+fig, (ax1, ax2) = plt.subplots(2,1,figsize=(10,8))
+
+ax1.set_title('COVID cases over time in Italy')
+ax1.set(xlabel='Date', ylabel='cases')
+ax1.plot(agg_df.index, agg_df['cases'], color='red')
+
+ax2.set_title('Frequency of search terms over time')
+ax2.set(xlabel='Date', ylabel='Search Interest')
+ax2.plot(agg_df.index, agg_df['depression'], color='blue')
+ax2.plot(agg_df.index, agg_df['anxiety'], color='green')
+plt.tight_layout()
+plt.show()
+
+
+# I plot ci mostrano che:
+# * Entrambi i termini erano molto ricercati anche prima del COVID;
+# * Entrambi i termini aveano un andamente molto oscillatorio nella frequenza delle ricerche prima del COVID, probaiblmente questo è il motivo per cui il valore della Pearson Correlation non supera mai il +0.6/-0.6;
+# * Il termine di ricerca legato all'ansia ha un picco precedente al contagio, ma dopo di esso la frequenza delle sue ricerche segue in maniera abbastanza precisa l'andamento dei contagi;
+# * L'interesse legato al termine di ricerca "depressione" era molto alto prima del contagio, ad un certo punto ha iniziato a decrescere e l'inizio dell'epidemia lo ha portato a crescere nuovamente. La correlazione negativa potrebbe essere dovuta al fatto che all'inizio del contagio il termine di ricerca era molto meno frequente rispetto ai mesi precedenti.
+# 
+# Per concludere la trattazione, utilizziamo la libreria `scipy` per calcolare anche altre misure di correlazione e i *p-value* legati ai coefficienti di correlazione, cercando di assicurarci che abbiano un valore basso, segno di una relazione significativa tra i nostri dati:
+# 
+
+# In[36]:
+
+
+corr, p = sci.pearsonr(agg_df['cases'], agg_df['depression'])
+print(f'Pearson correlation: {corr:.3f}\n\t p-value: {p:.4f}')
+
+corr, p = sci.spearmanr(agg_df['cases'], agg_df['depression'])
+print(f'Spearman correlation: {corr:.3f}\n\t p-value: {p:.4f}')
+
+corr, p = sci.kendalltau(agg_df['cases'], agg_df['depression'])
+print(f'Kendall correlation: {corr:.3f}\n\t p-value: {p:.4f}')
+
