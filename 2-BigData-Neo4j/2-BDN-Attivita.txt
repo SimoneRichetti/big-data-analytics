@@ -1,0 +1,507 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# # Recommendation usecase – neo4j sandbox e Python
+# Simone Richetti, mat. 129180, attività 2.
+
+# ## Traccia
+# 
+# Completare lo studio della [Recommendation Sandbox](http://neo4j.com/sandbox-v2/) vista a lezione, provando e studiando le tecniche avanzate. Quindi:
+# *   **Collaborative filtering, componente temporale**: come si potrebbe sfruttare il timestamp dei rating per generare suggerimenti più interessanti? Commentare e costruire (almeno) due interrogazioni per mostrarlo;
+# *   **Content-based filtering, keyword**: come si potrebbero migliorare i tratti comuni considerati sfruttando le parole chiave disponibili nella trama (plot) dei film? Commentare come si potrebbero modellare tali parole chiave nel grafo, quindi scrivere un programma Python che estenda il grafo estraendo e  memorizzando in modo opportuno (una parte di) tali parole (semplificazione opzionale senza Python: estendere una porzione di grafo manualmente via comandi cypher). Infine, scrivere (almeno) due esempi di interrogazione che le sfrutti, estendendo un esempio della sandbox.
+
+# ## Dipendenze
+
+# In[1]:
+
+
+# !pip install neo4j-driver
+from neo4j.v1 import GraphDatabase, basic_auth
+from string import punctuation
+from nltk.corpus import stopwords 
+from nltk.tokenize import word_tokenize
+from nltk.stem import PorterStemmer
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import TfidfTransformer
+from tqdm import tqdm
+
+import math
+import nltk
+nltk.download('punkt')
+nltk.download('stopwords')
+
+
+# ## Dati utilizzati e setup Neo4j Sandbox
+# Per questo progetto è stato utilizzato il dataset contenuto nella sandbox **Recommendation** di Neo4j. È possibile effettuare il setup dell'ambiente in pochi semplici passi:
+# 1.   Effettuare il login e/o registrarsi al link delle [Sandbox Neo4j](https://sandbox.neo4j.com/);
+# 2.   Creare un nuovo progetto e selezionare il progetto *Recommendation*;
+# 3.   Nella sezione *Connect via drivers* selezionare il radiobutton *Python*: recuperare nello snippet di codice l'URL e le credenziali con cui connettersi alla sandbox e inserirle nella *code cell* sottostante:
+
+# In[2]:
+
+
+# Overwrite values with yours
+SANDBOX_URL = "bolt://18.233.63.181:35032"
+SANDBOX_USERNAME = "neo4j"
+SANDBOX_PASSWD = "diameters-father-farads"
+
+
+# Ora è possibile connettersi via script Python alla sandbox per effettuare *cypher queries* su di essa:
+
+# In[3]:
+
+
+driver = GraphDatabase.driver(
+    SANDBOX_URL, 
+    auth=basic_auth(SANDBOX_USERNAME, SANDBOX_PASSWD))
+session = driver.session()
+
+# Query and print node labels
+cypher_query = '''
+CALL db.labels()
+'''
+
+results = session.run(cypher_query,
+  parameters={})
+
+print('NODE LABELS:')
+for record in results:
+  print('*', record['label'])
+print('')
+
+# Query and print relationships
+cypher_query = '''
+CALL db.relationshipTypes()
+'''
+
+results = session.run(cypher_query,
+  parameters={})
+
+print('RELATIONSHIP TYPES:')
+for record in results:
+  print('*', record['relationshipType'])
+
+
+# ---
+
+# # Parte 1 - Collaborative Filtering: componente temporale
+# Gli algoritmi di tipo *collaborative filtering* sfruttano le informazioni legate alle recensioni degli utenti per fornire *recommendations* rilevanti. La sandbox fornisce diversi esempi più e meno sofisticati di queries che sfruttano questo tipo di informazioni. In questa parte verranno proposte tre queries che cercano di utilizzare, in aggiunta alle altre informazioni, anche il timestamp delle recensioni per trovare suggerimenti significativi.
+
+# ## Query 1.1 - Tendenze
+# Un primo esempio molto semplice è quello dell'individuazione dei film "in tendenza", ovvero i film più visti nell'ultimo periodo.
+# 
+# Questo è un esempio atipico di *recommendation* poichè non è mirato direttamente ad un utente ma è identico per tutti gli utenti, nonostante ciò rimane un sistema di suggerimenti molto utilizzato su numerose piattaforme e basato esclusivamente su rating e timestamp di tutte le reviews del sistema.
+# 
+# Poichè il dataset non è costantemente aggiornato, si considerano le tendenze relative agli ultimi due mesi in cui sono presenti recensioni. Considerando solo le recensioni create in quel periodo, si riportano i dieci film che hanno ricevuto le migliori recensioni.
+
+# In[4]:
+
+
+last_review_time_query = '''MATCH ()-[r:RATED]->()
+RETURN r.timestamp AS time
+ORDER BY time DESC
+LIMIT 1
+'''
+trending_query = '''MATCH (:User)-[r:RATED]->(m:Movie)
+WHERE $referenceTime - r.timestamp < 5256000
+RETURN m.title, avg(r.rating) AS ratings
+ORDER BY ratings DESC
+LIMIT 30
+'''
+last_timestamp = session.run(last_review_time_query).single()['time']
+results = session.run(trending_query, parameters={'referenceTime': last_timestamp})
+print("TRENDING MOVIES:")
+for result in results:
+  print(result)
+
+
+# ## Query 1.2 - Suggerimenti per recensioni simili
+# Questa query si differenzia dalla precedente in quanto diretta ad uno specifico utente e per una maggior complessità. Di seguito viene spiegato il ragionamento applicato e il codice in *cypher language* della query:
+# 1. **Si identificano le recensioni più importanti e più recenti per l'utente.** Si selezionano solo le recensioni che hanno una media di 4 o più, si ordinano per *timestamp* decrescente e si prendono solo le prime 3. Queste sono le recensioni che rappresentano le preferenze dell'utente in questo momento:
+# 
+#         MATCH (m1:Movie)<-[r1:RATED]-(ref_u:User {name: $targetUserName})
+#         WHERE r1.rating >= 4.0
+#         WITH m1, r1, ref_u 
+#         ORDER BY r1.timestamp DESC 
+#         LIMIT 3
+# 
+# 2. **Si identificano le recensioni più simili ad esse, trovando così gli utenti con gusti simili nello stesso arco temporale**. Si cercano le recensioni di altri utenti allo stesso film, con voti alti e timestamp simile (differenza tra i due timestamp inferiore ai tre mesi):
+# 
+#         MATCH (m1:Movie)<-[r2:RATED]-(sim_u:User)
+#         WHERE r2.rating >= 4.0
+#         AND abs(r1.timestamp - r2.timestamp) < 7884000
+#         AND sim_u.userId<>ref_u.userId
+#         WITH sim_u, ref_u, m1, r1
+# 
+# 3. **Si identificano i film meglio recensiti dagli utenti con gusti comuni**. Si applica la stessa ricerca del punto 1 agli utenti trovati nel punto 2, così da trovare i film piaciuti nel periodo recente agli utenti con gusti simili: questi film costituiscono i nostri suggerimenti all'utente di riferimento.
+# 
+#         MATCH (sugg_m:Movie)<-[r3:RATED]-(sim_u:User)
+#         WHERE r3.rating >= 4.0
+#         AND abs(r1.timestamp - r3.timestamp) < 7884000
+#         AND NOT (sugg_m)<-[:RATED]-(ref_u)
+#         RETURN DISTINCT sugg_m.title AS title
+# 
+# È possibile modificare l'utente su cui applicare la query modificando la variabile `TARGET_USER_NAME`: si noti però che questa query non garantisce di trovare soluzioni poichè per alcuni utenti i vincoli sul timestamp delle recensioni potrebbero essere molto stringenti.
+
+# In[5]:
+
+
+TARGET_USER_NAME = 'Cynthia Freeman'
+
+best_reviews_cypher = '''
+MATCH (m1:Movie)<-[r1:RATED]-(ref_u:User {name: $targetUserName})
+WHERE r1.rating >= 4.0
+WITH m1, r1, ref_u 
+ORDER BY r1.timestamp DESC 
+LIMIT 3
+
+MATCH (m1:Movie)<-[r2:RATED]-(sim_u:User)
+WHERE r2.rating >= 4.0
+AND abs(r1.timestamp - r2.timestamp) < 7884000
+AND sim_u.userId<>ref_u.userId
+WITH sim_u, ref_u, m1, r1
+
+MATCH (sugg_m:Movie)<-[r3:RATED]-(sim_u:User)
+WHERE r3.rating >= 4.0
+AND abs(r1.timestamp - r3.timestamp) < 7884000
+AND NOT (sugg_m)<-[:RATED]-(ref_u)
+RETURN DISTINCT sugg_m.title AS title
+LIMIT 30
+'''
+
+results = session.run(best_reviews_cypher, parameters={'targetUserName': TARGET_USER_NAME})
+print("RECOMMENDED MOVIES FOR", TARGET_USER_NAME, ":")
+for result in results:
+  print('*', result['title'])
+
+
+# ## Query 1.3 - Estensione esempio Cosine Similarity
+# Questa query si propone di estendere una delle query presentate tra gli esempi della sandbox. In questo esempio viene utilizzata la misura detta *Cosine Similarity* per calcolare la similarità tra due utenti.
+# 
+# La **Cosine Similarity** tra due insiemi $A$ e $B$ è calcolata come:
+# 
+# $$sim(A,B) = \frac{A \cdot B}{\|A\| \times \|B\|} = \frac{\sum_{i=1}^n A_i \times B_i}{\sqrt{\sum_{i=1}^n A_i^2} \times \sqrt{\sum_{i=1}^n B_i^2}},\\
+# sim(A,B) \in [-1,1].$$
+# 
+# Nell'esempio della sandbox, $A$ e $B$ sono vettori contenenti i voti dati da due utenti ai film che hanno visto entrambi. Più questi due vettori sono simili, più la similarità è alta.
+# 
+# Nella nostra query, calcoleremo non solo una similarità in termini di rating simili allo stesso film ma anche una similarità in termini di tempistiche, ovvero timestamp simili delle recensioni agli stessi film. Questa similarità andrà combinata con la precedente per dare più peso alle recensioni che hanno un rating simile pubblicate nello stesso periodo. In questo modo potremo individuare in maniera più accurata gli utenti più simili tra loro.
+# 
+# Andiamo quindi nel dettaglio del codice *cypher* della query per spiegarne il funzionamento:
+# 
+# 1. Partendo dall'utente target, consideriamo tutti gli utenti che hanno recensito gli stessi film recensiti da lui. Per ciascun utente creiamo due vettori, uno contenente i rating delle sue recensioni e uno contenente i timestamp:
+# 
+#         MATCH (p1:User {name: $targetUserName})-[x:RATED]->(movie)<-[x2:RATED]-(p2:User)
+#         WHERE p2 <> p1
+#         WITH p1, p2, 
+#             collect(x.rating) AS p1Ratings, collect(x2.rating) AS p2Ratings,
+#             collect(x.timestamp) AS p1Times, collect(x2.timestamp) AS p2Times
+# 
+# 2. Considerando solo gli utenti che hanno più di 10 film in comune con l'utente target, calcoliamo la *Cosine Similarity* per ratings e per timestamp:
+# 
+#         WHERE size(p1Ratings) > 10
+#         WITH p1, p2,
+#             algo.similarity.cosine(p1Ratings, p2Ratings) AS ratingSimilarity,
+#             algo.similarity.cosine(p1Times, p2Times) AS timeSimilarity
+# 
+# 3. Calcoliamo quindi la similarity complessiva tra i due utenti come media pesata delle due similarità precedentemente calcolate, in cui i ratings pesano 3 volte tanto i timestamp. Consideriamo infine i 10 utenti con similarità più alta:
+# 
+#         WITH p1, p2, ((3*ratingSimilarity)+timeSimilarity)/4 AS similarity
+#         ORDER BY similarity DESC
+#         LIMIT 10
+# 
+# 4. Una volta identificati gli utenti più simili, i film consigliati saranno i film che questi ultimi hanno più gradito. Sono quindi considerati i film recensiti da questo sottoinsieme degli utenti e si selezionano i dieci film con media voti migliore:
+#         MATCH (p2)-[x3:RATED]->(rec:Movie)
+#         WHERE NOT EXISTS ( (p1)-[:RATED]->(rec) )
+#         RETURN rec.title, avg(x3.rating) AS score
+#         ORDER BY score DESC
+#         LIMIT 10
+
+# In[6]:
+
+
+query = '''MATCH (p1:User {name: $targetUserName})-[x:RATED]->(movie)<-[x2:RATED]-(p2:User)
+WHERE p2 <> p1
+WITH p1, p2, collect(x.rating) AS p1Ratings, collect(x2.rating) AS p2Ratings, 
+    collect(x.timestamp) AS p1Times, collect(x2.timestamp) AS p2Times
+WHERE size(p1Ratings) > 10
+WITH p1, p2,
+       algo.similarity.cosine(p1Ratings, p2Ratings) AS ratingSimilarity,
+       algo.similarity.cosine(p1Times, p2Times) AS timeSimilarity
+WITH p1, p2, ((3*ratingSimilarity)+timeSimilarity)/4 AS similarity
+ORDER BY similarity DESC
+LIMIT 10
+
+MATCH (p2)-[x3:RATED]->(rec:Movie)
+WHERE NOT EXISTS ( (p1)-[:RATED]->(rec) )
+RETURN rec.title, avg(x3.rating) AS score
+ORDER BY score DESC
+LIMIT 30'''
+results = session.run(query, parameters={'targetUserName': TARGET_USER_NAME})
+print("RECOMMENDED MOVIES FOR", TARGET_USER_NAME, ":")
+for result in results:
+  print(result)
+
+
+# ---
+
+# # Parte 2 - Content-based Filtering
+# 
+# Gli algoritmi di tipo *content-based filtering* cercano la similarità tra film utilizzando i loro attributi in comune. La sandbox fornisce esempi che sfruttano genere, attori o registi in comune tra film e utilizzano diverse metriche di similarità per consigliare film simili a quelli che un utente ha maggiormente gradito.
+# 
+# Nella prima parte di questa sezione si usa l'algoritmo *tf-idf* per estrarre le parole più importanti della trama di ogni film e si estende il dataset aggiungendo queste parole chiave per ciascun film. Nella seconda parte sono riportate due query che, partendo da alcuni esempi forniti dalla sandbox, mostrano come sfruttare le parole chiave della trama dei film per migliorare la misura di similarità tra essi.
+
+# ## Modifica Database
+# In questa seconda parte, la traccia del progetto chiede di:
+# 1. Estrarre le parole chiave dai plot dei film;
+# 2. Estendere il grafo modellando le parole chiave all'interno di esso;
+# 3. Formulare queries che sfruttino queste keyword per fornire *content-based recommendations*.
+
+# ### Estrazione Keyword
+# Per individuare le parole più importanti all'interno della trama dei film si è scelto di utilizzare una misura chiamata **tf-idf (Term Frequency - Inverse Document Frequency)**. Per ogni parola in ogni documento, vengono enumerate le occorrenze di quel termine all'interno del documento e le occorrenze di quel termine in tutto il corpus di documenti, ovvero tutte le trame dei film. Lo score *tf-idf* è proporzionale al rapporto tra queste due quantità: 
+# 
+# $$ tf\_idf(t, d) = tf(t, d) * idf(t) \\
+# idf(d, t) = log \left[ \frac{(1 + n)}{(1 + df(d, t))} \right] + 1$$
+# 
+# dove $tf(t,d)$ è il numero di volte in cui il termine $t$ compare nel documento $d$, $n$ è il numero di documenti considerati e $df(d,t)$ è il numero di documenti in cui compare il termine $t$. Viene aggiunto 1 al numeratore e al denominatore all'interno del logaritmo per rendere il valore dell'$idf$ più *smooth*, viene aggiunto 1 al logaritmo per evitare di moltiplicare per zero. Più questo score è alto, più una parola appare frequentemente nel documento e meno frequentemente in tutto il corpus, segno della rilevanza di quella parola nella specifica trama.
+# 
+# Seguono alcune considerazioni sull'implementazione prima di passare al codice:
+# 1. Non sono stati utilizzati tutti i film del dataset per ragioni di tempo computazionale. Considerando solo i film con più di due recensioni si sono considerati circa i 2/3 del dataset. Per un risultato migliore è possibile rimuovere la seconda clausola `WHERE` dalla query nella funzione `get_movies_plot()` in modo da considerare ogni film del dataset, ma così facendo l'esecuzione ci metterà più tempo;
+# 2. Per migliorare la qualità del risultato finale viene applicato un preprocessing alla trama di ogni film. Il preprocessing sfrutta le funzionalità offerte dalla libreria  `nltk` ed è composto da:
+#     1. Lowering di tutto il testo;
+#     2. Rimozione della punteggiatura;
+#     3. Tokenizzazione;
+#     4. Rimozione delle stopwords;
+#     5. Stemming.
+# 3. Si è scelto di estrarre per ciascun film tre keyword, corrispondenti alle tre parole con TF-IDF maggiore.
+# 
+# *Nota: Per parte del codice qui implementato si deve dare credito all'autore di [questo notebook](https://github.com/kavgan/nlp-in-practice/tree/master/tf-idf).*
+
+# In[7]:
+
+
+def get_movies_plots():
+    '''Query and preprocess movie plots'''
+    
+    query = '''MATCH (m:Movie)<-[r:RATED]-(:User)
+        WHERE EXISTS(m.plot)
+        WITH m, count(r) AS n_revs
+        WHERE n_revs > 2
+        RETURN m.title, m.plot
+    '''
+    results = session.run(query)
+    data = dict()
+    for result in results:
+        data[result['m.title']] = result['m.plot']
+    
+    filtered_data = dict()
+    for movie in data.keys():
+        # Lowering
+        plot = data[movie].lower()
+        # Remove punctuation
+        plot = plot.translate(str.maketrans('', '', punctuation))
+
+        stop_words = set(stopwords.words('english')) 
+        # Tokenize
+        word_tokens = word_tokenize(plot)
+        # Filter stop words
+        filtered_sentence = [w for w in word_tokens if not w in stop_words]
+
+        # Stem
+        ps = PorterStemmer()
+        newlist = []
+        for word in filtered_sentence:
+            newlist.append(ps.stem(word))
+        filtered_data[movie] = ' '.join(newlist)
+
+    return filtered_data
+
+
+def sort_coo(coo_matrix):
+    '''Sort a matrix in COOrdinate format'''
+    
+    # Transform matrix in a list of tuple with shape [(keyword_index, tf-idf_score), ...]
+    tuples = zip(coo_matrix.col, coo_matrix.data)
+    # Sort for descending tf-idf score
+    return sorted(tuples, key=lambda x: (x[1], x[0]), reverse=True)
+
+
+def extract_topn_from_vector(keyword_names, sorted_items, topn=3):
+    '''Get the keyword names and TF-IDF score of top n items'''
+    
+    # Use only topn items from vector
+    sorted_items = sorted_items[:topn]
+    results = []
+
+    for idx, score in sorted_items:
+        # Get keyword name from keyword index
+        fname = keyword_names[idx]
+        results.append(fname)
+
+    return results
+
+
+# In[8]:
+
+
+dataset = get_movies_plots()
+docs = list(dataset.values())
+# Discard all the words that appear in more than the 70% of the movies.
+cv=CountVectorizer(max_df=0.70, max_features=2000)
+word_count_vector=cv.fit_transform(docs)
+
+# Compute idf values
+tfidf_transformer=TfidfTransformer()
+tfidf_transformer.fit(word_count_vector)
+
+keyword_names=cv.get_feature_names()
+movie_keywords = {}
+keywords_set = {}
+
+for movie in dataset.keys():
+    # Compute tf-idf score for each word and extract the 3 words with
+    # highest score
+    tf_idf_vector=tfidf_transformer.transform(cv.transform([dataset[movie]]))
+    sorted_items=sort_coo(tf_idf_vector.tocoo())
+    keywords=extract_topn_from_vector(keyword_names,sorted_items)
+    for key in keywords:
+        if key in keywords_set:
+            keywords_set[key] += 1
+        else:
+            keywords_set[key] = 1
+    movie_keywords[movie] = keywords
+
+# Print top keywords
+print ({k: v for k, v in sorted(keywords_set.items(), key=lambda item: item[1], reverse=True) if v > 10})
+print(f'Numero tag estratti: {len(keywords_set.keys())}')
+
+
+# ### Modifica grafo
+# Una volta estratte le informazioni necessarie dal dataset, è necessario inserirle nel grafo per poterle sfruttare nelle nostre queries. Ci sono due alternative per espandere il grafo con queste informazioni:
+# 1. Aggiungere ad ogni nodo `:Movie` un attributo di tipo lista contenente le tre keyword estratte per esso;
+# 2. **Aggiungere le parole chiave come nodi del grafo con label `:Tag` e creare una relazione `:HAS_TAG` che leghi ogni film alle keyword relative ad esso.**
+# 
+# Si è scelto di utilizzare la seconda soluzione poichè rende possibile sfruttare l'espressività e la flessibilità dei *path* tra i nodi, oltre che a semplificare il codice delle queries che seguiranno per identificare *tags* comuni tra i nodi. 
+# > NOTA: Aggiungiamo solo i tag presenti in almeno 8 film per semplici ragioni di tempo: i tag estratti sono in tutto 1990, ci vorrebbe molto tempo per aggiungerli al grafo della sandbox. Filtrando solo i tag presenti in almeno 8 film verranno aggiunti al grafo 520 tags.
+
+# In[13]:
+
+
+def add_tags_database(map, tags):
+    '''Add tags and relationships to a Neo4j dataset
+
+    Given a set of tags and a map between movies and related tags, create tag nodes and
+    create relationships between movies and tags.
+    '''
+
+    create_tag_query = 'CREATE (:Tag {name: $tag})'
+    for idx in tqdm(range(len(tags))):
+        tag = tags[idx]
+        session.run(create_tag_query, parameters={'tag': tag})
+        
+    print('Tags aggiunti al grafo', flush=True)
+    
+    create_tag_relationship_query = '''MATCH (m:Movie {title: $movie}), (t:Tag {name: $tag})
+    CREATE (m)-[:HAS_TAG]->(t)'''
+    movie_tag_map = list(map.items())
+    for idx in tqdm(range(len(movie_tag_map))):
+        movie, mtags = movie_tag_map[idx]
+        for tag in mtags:
+            if tag in tags:
+                session.run(create_tag_relationship_query, 
+                            parameters={'movie': movie, 'tag': tag})
+    print('Relazioni Movie-Tag aggiunte al grafo')
+
+tags_to_add = [ tag for tag, count in keywords_set.items() if count > 8 ]
+print(f'Numero tag da aggiungere al grafo: {len(tags_to_add)}', flush=True)
+add_tags_database(movie_keywords, tags_to_add)
+
+test_db_query = '''MATCH (m:Movie)-[r:HAS_TAG]->(t:Tag)
+RETURN t.name, count(r) AS movies
+ORDER BY movies DESC
+LIMIT 30'''
+results = session.run(test_db_query)
+for result in results:
+    print(result)
+
+
+# ## Query 2.1 - Weighted Content Algorithm
+# 
+# Questa query è un'estensione dell'esempio che sfrutta il *weighted content algorithm* per misurare la similarità tra due film. Questo algoritmo considera il numero di generi, attori e registi in comune tra due film, assegna un peso a ciascuno di questi elementi in base a quanto essi siano significativi per la somiglianza tra i film (ad esempio, due film dello stesso genere è probabile che siano più simili di due film che hanno lo stesso regista ma generi diversi) e calcola uno score di somiglianza come una somma pesata degli elementi in comune.
+# 
+# La query seguente estende questo esempio considerando anche i tag in comune: visto il ridotto numero di tag, è raro che due film condividano uno stesso tag, quindi è ragionevole associare un peso alto al numero di tag in comune. Inoltre, un tag in comune è indice di due trame simili tra loro, ciò rende i tag un elemento significativo di similarità: per questo si è deciso di associare ad essi lo stesso peso dei generi, il più alto tra quelli associati ai diversi elementi.
+
+# In[14]:
+
+
+wca_query = '''MATCH (m:Movie) WHERE m.title = "Inception"
+MATCH (m)-[:IN_GENRE]->(g:Genre)<-[:IN_GENRE]-(rec:Movie)
+
+WITH m, rec, COUNT(*) AS gs
+
+OPTIONAL MATCH (m)<-[:ACTED_IN]-(a:Actor)-[:ACTED_IN]->(rec)
+WITH m, rec, gs, COUNT(a) AS as
+
+OPTIONAL MATCH (m)<-[:DIRECTED]-(d:Director)-[:DIRECTED]->(rec)
+WITH m, rec, gs, as, COUNT(d) AS ds
+
+OPTIONAL MATCH (m)-[:HAS_TAG]->(t:Tag)<-[:HAS_TAG]-(rec)
+WITH m, rec, gs, as, ds, COUNT(t) as ts
+
+RETURN rec.title AS recommendation, (5*ts)+(5*gs)+(3*as)+(4*ds) AS score ORDER BY score DESC LIMIT 30'''
+
+results = session.run(wca_query)
+for result in results:
+    print(result)
+
+
+# ## Query 2.2 - Jaccard similarity
+# 
+# la *Jaccard similarity* è una vera e propria misura di similarità. Dati due insiemi di elementi $A$ e $B$, essa si definisce come il rapporto tra il numero di elementi nell'intersezione dei due insiemi e il numero di elementi nell'unione dei due insiemi:
+# 
+# $$ J(A,B) = \frac{|A \cap B|}{|A \cup B|} $$
+# 
+# Due insiemi identici hanno una similarità di 1, due insiemi senza elementi in comune hanno similarità 0. La sandbox fornisce un esempio in cui gli insiemi $A$ e $B$ sono dati dall'insieme di attori, generi e registi di due film: in questo modo possiamo utilizzare la *Jaccard Similarity* per calcolare la similarità tra due film in termini di caratteristiche condivise tra i due.
+# 
+# La query seguente estende l'esempio della sandbox considerando anche i tag nell'insieme degli elementi di un film. Per comprendere più facilmente il codice *cypher*, si spiega il significato degli *alias* utilizzati nella query:
+# 
+# * `intersection`: numero di elementi in comune tra due film;
+# * `s1`: elementi presenti nel set del film di riferimento;
+# * `s2`: elementi presenti nel set del film che vogliamo confrontare;
+# * `union`: insieme dato dall'unione di `s1` e `s2`;
+# * `jaccard`: $\frac{intersection}{|union|}$.
+
+# In[15]:
+
+
+jaccard_similarity_query = '''
+MATCH (m:Movie {title: "Inception"})-[:IN_GENRE|:ACTED_IN|:DIRECTED|:HAS_TAG]-(t)<-[:IN_GENRE|:ACTED_IN|:DIRECTED|:HAS_TAG]-(other:Movie)
+WITH m, other, COUNT(t) AS intersection, COLLECT(t.name) AS i
+
+MATCH (m)-[:IN_GENRE|:ACTED_IN|:DIRECTED|:HAS_TAG]-(mt)
+WITH m,other, intersection,i, COLLECT(mt.name) AS s1
+
+MATCH (other)-[:IN_GENRE|:ACTED_IN|:DIRECTED|:HAS_TAG]-(ot)
+WITH m,other,intersection,i, s1, COLLECT(ot.name) AS s2
+
+WITH m,other,intersection,s1,s2
+
+WITH m,other,intersection,s1+filter(x IN s2 WHERE NOT x IN s1) AS union, s1, s2
+
+RETURN m.title, other.title,((1.0*intersection)/SIZE(union)) AS jaccard ORDER BY jaccard DESC LIMIT 30'''
+
+results = session.run(jaccard_similarity_query)
+for result in results:
+    print(result)
+
+
+# # Extras
+# Per riportare il database Neo4j allo stato precedente all'aggiunta dei tag, rimuovere i commenti dalla *code cell* seguente ed eseguirla:
+
+# In[ ]:
+
+
+# delete_tags_query = '''MATCH (t:Tag)
+# DETACH DELETE (t)'''
+# session.run(delete_tags_query)
+

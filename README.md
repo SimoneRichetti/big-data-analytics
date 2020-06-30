@@ -19,6 +19,8 @@ This file is a short readme about setting up the environment for running the pro
 > conda install seaborn
 > conda install pymongo
 > conda install -c anaconda neo4j-python-driver
+> pip install neo4j-driver
 > conda install nltk
 > conda install -c intel scikit-learn
+> conda install -c conda-forge tqdm
 ```
