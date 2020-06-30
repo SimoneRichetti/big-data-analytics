@@ -1,16 +1,17 @@
 # Big Data Analytics Projects
 
-This file is a short readme about setting up the environment for running the projects.
+Questo file è un breve README con le istruzioni per creare l'environment in cui eseguire i progetti.
 
 ## Setup Anaconda environment
 
-### The fast way
+### Import automatico dell'environment da file (Consigliato)
 ```
+> cd path/to/dir
 > conda env create -f environment.yml
 > conda activate big-data-projects
 ```
 
-### The manual way
+### Setup manuale
 ```
 > conda create --name big-data-projects python=3.7
 > conda activate big-data-projects

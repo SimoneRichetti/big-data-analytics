@@ -1,0 +1,340 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# # MongoDB - Modellazione e interrogazione su dati reali
+# Simone Richetti, mat. 129180, attività 1.
+
+# ## Traccia
+# 
+# Partendo da uno dei dataset reali *Airbnb* presenti alla pagina http://insideairbnb.com/get-the-data.html, convertirne in JSON la struttura modellandola in modo opportuno (manualmente su alcuni esempi o attraverso
+# uno script python) (è possibile considerare anche solo una porzione dei campi originari). Quindi, inserire i dati in una collezione e interrogarli creando 5 interrogazioni di crescente difficoltà, incluse interrogazioni di
+# aggregazione.
+
+# ## Dati
+# Sono stati utilizzati i dati pubblici di *Airbnb* resi disponibili all'indirizzo http://insideairbnb.com/get-the-data.html. \
+# Più nello specifico, sono stati utilizzati i dati relativi ai *listings* di Roma:  http://data.insideairbnb.com/italy/lazio/rome/2020-02-19/data/listings.csv.gz.
+# 
+# Si noti come, affinchè il notebook funzioni, sia necessario avere nella sua stessa directory un file di nome <code>listings.csv</code> contenente i dati da utilizzare nel formato in cui sono forniti da *Airbnb*.
+
+# ## Dipendenze
+
+# In[1]:
+
+
+import csv
+import collections
+import json
+import pymongo
+
+
+# ***
+
+# # Parte 1 - Conversione CSV to JSON
+# Questa prima parte di notebook ha lo scopo di:
+# 1. Estrarre i dati dal file CSV e salvarli in una lista di dictionary;
+# 2. Manipolare i dictionaries in modo da:\
+#     a. Effettuare il casting al tipo di dato più opportuno dei diversi campi;\
+#     b. Eliminare i campi vuoti;\
+#     c. Creare il campo *location*.
+# 3. Trasformare ogni dictionary in un oggetto JSON. 
+
+# La lista che segue è una lista di tuple del tipo `(<field_name>, <data_type>, <parent_field>)`. Questa lista è utilizzata per definire la struttura degli oggetti JSON a partire dai dictionary contenenti i campi del file CSV. 
+# 
+# Ho scelto di mantenere solo un sottoinsieme dei campi iniziali e di creare una struttura annidata che identifica quelli che sono, a mio parere, gli aspetti più importanti, interessanti e utilizzati di questi dati: **il gestore, la posizione, gli spazi dell'appartamento, il prezzo e le recensioni**. Ciascuno di questi campi ha come campi annidati quelli forniti dal file CSV correlati al relativo aspetto. Si aggiungono a questi le informazioni di base come id, nome e descrizione. Questi campi saranno a loro volta sfruttati nelle queries della parte 3.
+# 
+# Seguono, infine, i nomi dei file di input (CSV) e output (JSON).
+
+# In[2]:
+
+
+LISTINGS_COL_SUBSET = [
+    ('id', 'int', None) ,
+    ('name','str', None),
+    ('summary','str', None),
+
+    ('host', 'dict', None),
+    ('host_id','int', 'host'),
+    ('host_name','str', 'host'),
+    ('host_listings_count','int', 'host'),
+
+    ('address', 'dict', None),
+    ('zipcode','str', 'address'),
+    ('city','str', 'address'),
+    ('street','str', 'address'),
+    ('neighbourhood', 'str', 'address'),
+    
+    ('location', 'dict', None),
+    ('longitude', 'flt', 'location'),
+    ('latitude', 'flt', 'location'),
+
+    ('spaces', 'dict', None),
+    ('property_type','str', 'spaces'),
+    ('room_type','str', 'spaces'),
+    ('accommodates','str', 'spaces'),
+    ('bathrooms','flt', 'spaces'),
+    ('bedrooms','int', 'spaces'),
+    ('beds','int', 'spaces'),
+    ('bed_type','str', 'spaces'),
+    ('square_feet','int', 'spaces'),
+    
+    ('pricing', 'dict', None),
+    ('price','prc', 'pricing'),
+    ('weekly_price','prc', 'pricing'),
+    ('monthly_price','prc', 'pricing'),
+
+    ('reviews', 'dict', None),
+    ('number_of_reviews','int', 'reviews'),
+    ('review_scores_rating', 'flt', 'reviews'),
+    ('review_scores_accuracy', 'flt', 'reviews'),
+    ('review_scores_cleanliness', 'flt', 'reviews'),
+    ('review_scores_checkin', 'flt', 'reviews'),
+    ('review_scores_communication', 'flt', 'reviews'),
+    ('review_scores_location', 'flt', 'reviews'),
+    ('review_scores_value', 'flt', 'reviews'),
+    ('reviews_per_month', 'flt', 'reviews')
+]
+LISTINGS_CSV_FILENAME = 'listings.csv'
+LISTINGS_JSON_FILENAME = 'listings.json'
+
+
+# In[3]:
+
+
+def parse_filter_csv(filename):
+    """Parse CSV file
+
+    Parse CSV file and stores data in a list of OrderedDict
+    """
+    
+    data = []
+    with open(filename, 'r', encoding='utf8') as csv_file:
+        col_names = csv_file.readline()[:-1].split(',')
+        csv_reader = csv.DictReader(csv_file, fieldnames=col_names)
+        data = list(csv_reader)
+    return data
+
+
+def filter_manage_csv(reader, col_types):
+    """Manage dictionary fields
+
+    Given a list of OrderedDict and a list of fields with relative data type,
+    remove empty fields, keeps only selected fields and make a cast to the 
+    desired data type. Cast prices from a string "[$|€][t,]hdu.dec" to the 
+    relative float.
+    """
+    
+    new_rows=[]
+    for row in reader:
+        # Remove rows without important fields
+        if not (row["name"] and row["host_id"] and row["price"]):
+            continue
+
+        # Cast strings to different types and populate dict
+        new_row = collections.OrderedDict()
+        for field, type, parent in col_types:
+            if type!="dict" and not row[field]:
+                continue
+            value = None
+            if type == "int":
+                value = int(row[field])
+            elif type == "flt":
+                value = float(row[field])
+            elif type=="prc":
+                value = float(row[field][1:].replace(',', ''))
+            elif type=="dict":
+                value = dict()
+            else:
+                value = row[field]
+            if not parent:
+                new_row[field] = value
+            else:
+                new_row[parent][field] = value
+
+        new_rows.append(new_row)
+
+    return new_rows
+
+
+# In[4]:
+
+
+listings = parse_filter_csv(LISTINGS_CSV_FILENAME)
+listings = filter_manage_csv(listings, LISTINGS_COL_SUBSET)
+with open(LISTINGS_JSON_FILENAME, 'w') as out_file:
+    json.dump(listings, out_file, indent=4)
+
+
+# ---
+
+# # Parte 2 - Creare database MongoDB e popolarlo
+# In questa seconda (breve) parte, l'obiettivo è quello di poplare un database MongoDB con i dati creati dallo script precedente e collegarsi ad esso per poter eseguire queries.
+# 
+# Il comando `mongoimport` ci permette di importare in un db (*test*) una nuova collection (*listings*) e popolarla con i documenti che abbiamo salvato nel file *listings.json*:
+#     
+#     $ mongoimport --db test --collection listings --drop --file listings.json --jsonArray
+# 
+# Poichè utilizzeremo l'operatore `$near` nella query 3 per sfruttare i dati sulla posizione geografica, è prima necessario creare un indice di tipo *2d* nel campo *location*. Per creare l'indice, utilizziamo il comando `mongo` per aprire una shell connessa al nostro db e utilizziamo le seguenti istruzioni:
+# 
+#     >use test
+#     >db.listings.createIndex({location: "2d"})
+# 
+# Per controllare che l'indice sia stato creato è possibile utilizzare il comando `>db.listings.getIndices()`.
+# 
+# Nel nostro secondo script python utilizziamo il package `pymongo` per creare una connessione con il nostro database e poter quindi effettuare queries su di esso:
+
+# In[5]:
+
+
+print("""
+Il comando `mongoimport` ci permette di importare in un db (*test*) una nuova collection (*listings*) e popolarla con i documenti che abbiamo salvato nel file *listings.json*:
+     
+    $ mongoimport --db test --collection listings --drop --file listings.json --jsonArray
+ 
+Poichè utilizzeremo l'operatore `$near` nella query 3 per sfruttare i dati sulla posizione geografica, è prima necessario creare un indice di tipo *2d* nel campo *location*. Per creare l'indice, utilizziamo il comando `mongo` per aprire una shell connessa al nostro db e utilizziamo le seguenti istruzioni:
+
+    >use test
+    >db.listings.createIndex({location: "2d"})
+ 
+Per controllare che l'indice sia stato creato è possibile utilizzare il comando `>db.listings.getIndices()`.
+""")
+print("\nImporta il file json creato dentro ad un database mongodb. Premi qualsiasi tasto una volta fatto per continuare")
+input()
+
+
+def print_results(cursor, fields=[]):
+    """Print query results
+
+    A utility function for printing query results. A list of fields can be given in
+    input to print only a subset of fields for each result.
+    """
+    
+    if fields:
+        for result in cursor:
+            out = dict()
+            for field in fields:
+                if '.' in field:
+                    parent_field, child_field = field.split('.')
+                    out[child_field] = result[parent_field][child_field]
+                else:
+                    out[field] = result[field]
+            print(out, "\n")
+    else:
+        for result in cursor:
+            print(result, "\n")
+
+
+client = pymongo.MongoClient('localhost', 27017)
+db = client.test
+collection = db.listings
+
+
+# ***
+
+# # Parte 3 - Queries
+# Nella terza e ultima parte implementiamo cinque queries di difficoltà crescente per la nostra collection *listings*. Le queries vogliono esplorare e studiare i principali aspetti dei dati identificati nella prima parte del notebook mediante delle queries che possano simulare delle plausibili ricerce da parte di clienti del sito.
+# 
+# Le queries sono:
+# 1.   Migliori 10 attici della città
+# 2.   Migliori 10 appartamenti con 5-10 letti e almeno 100 recensioni
+# 3.   Gli appartamenti più vicini al Colosseo
+# 4.   Quartieri con prezzi mensili mediamente più bassi
+# 5.   Migliori 10 gestori di appartamenti
+
+# ## Query 1: Migliori 10 attici della città
+# Questa query usa un'espressione regolare per trovare tutte le descrizioni che contengono la parola "*attic*" e sceglie i 10 appartamenti con le migliori recensioni. A parità di voti nelle recensioni si considera l'appartamento che ne ha ricevute di più.
+
+# In[6]:
+
+
+cursor = collection.find({"summary": {"$regex": "attic"}})    .sort([("reviews.review_scores_value", pymongo.DESCENDING),
+           ("reviews.number_of_reviews", pymongo.DESCENDING)])\
+    .limit(10)
+print_results(cursor, ["name", "summary", 
+                       "reviews.review_scores_value", "reviews.number_of_reviews"])
+
+
+# ## Query 2: Migliori 10 appartamenti con 5-10 letti e almeno 100 recensioni
+# Questa query usa operatori logici e aritmetici per trovare tutti gli appartamenti che abbiano tra i 5 e i 10 letti, un voto nelle recensioni maggiore di 8 e almeno 100 recensioni. Questa potrebbe essere una ricerca plausibile per una famiglia numerosa o un gruppo di amici.
+
+# In[7]:
+
+
+cursor = collection.find(
+    {
+        "$and": [
+            {"spaces.beds": {"$gte": 5}}, 
+            {"spaces.beds": {"$lte": 10}}, 
+            {"reviews.review_scores_value": {"$gt": 8}},
+            {"reviews.number_of_reviews": {"$gt": 100}}
+        ]
+    }
+).sort([("reviews.review_scores_value", pymongo.DESCENDING),
+        ("reviews.number_of_reviews", pymongo.DESCENDING)]).limit(10)
+print_results(cursor, ["name", "spaces.beds", 
+                       "reviews.review_scores_value", "reviews.number_of_reviews"])
+
+
+# ## Query 3: Gli appartamenti più vicini al Colosseo
+# Questa query utilizza utilizza l'indice geografico creato precedentemente con l'operatore ``$near`` per identificare i 10 appartamenti più vicini al Colosseo, sfruttando le sue coordinate di latitudine e longitudine.
+
+# In[8]:
+
+
+COLOSSEUM_LATITUDE = 41.890278
+COLOSSEUM_LONGITUDE = 12.492222
+
+cursor = collection.find(
+    {
+        "location": {"$near": [COLOSSEUM_LONGITUDE, COLOSSEUM_LATITUDE]}
+    }
+).limit(10)
+print_results(cursor, ["name", "summary", "location"])
+
+
+# ## Query 4: Quartieri con prezzi mensili mediamente più bassi
+# Questa query utilizza la pipeline di aggregazione per identificare i quartieri in cui gli appartamenti hanno il prezzo medio mensile più basso. Questa query potrebbe riprodurre la ricerca di uno studente fuorisede che vuole identificare la zona più economica in cui cercare un appartamento per stabilirsi in città.
+
+# In[9]:
+
+
+cursor = collection.aggregate(
+    [
+        {"$match": {"$and": [{"pricing.monthly_price": {"$exists": True}}, 
+                             {"address.neighbourhood": {"$exists": True}}]}},
+        {
+            "$group": {
+                "_id": "$address.neighbourhood",
+                "avg_price": {"$avg": "$pricing.monthly_price"},
+                "number_of_apartments": {"$sum": 1}
+            }
+        },
+        {"$sort": {"avg_price": 1}},
+        {"$limit": 20}
+    ]
+)
+print_results(cursor)
+
+
+# ## Query 5: Migliori 10 gestori di appartamenti
+# Questa query sfrutta la pipeline di aggregazione per identificare i migliori "gestori" di appartamenti. Per fare ciò, vengono raggruppati gli appartamenti che hanno lo stesso proprietario, si calcola la media dei voti delle recensioni degli appartamenti e si somma il loro numero. Si considerano i 10 gestori con la più alta media di recensioni e, in caso di parità, si considera quello con il numero maggiore di recensioni.
+
+# In[10]:
+
+
+cursor = collection.aggregate(
+    [
+        {
+            "$group": 
+                {
+                    "_id": "$host.host_id",
+                    "name": {"$addToSet": "$host.host_name"},
+                    "rating": {"$avg": "$reviews.review_scores_value"}, 
+                    "reviews": {"$sum": "$reviews.number_of_reviews"}
+                }
+        },
+        {"$sort": {"rating": -1, "reviews": -1}},
+        {"$limit": 10}
+    ]
+)
+print_results(cursor)
+
