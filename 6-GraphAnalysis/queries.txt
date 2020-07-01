@@ -1,0 +1,167 @@
+// ==============================
+// INFORMAZIONI GLOBALI SUL GRAFO
+// ==============================
+
+
+MATCH (:Person)
+RETURN count(*)
+
+MATCH (:Crime)
+RETURN count(*)
+
+MATCH (:Person)-->(c:Crime)
+RETURN DISTINCT c
+
+MATCH (:Person)-->(:Person)
+RETURN count(*)
+
+CALL algo.allShortestPaths.stream(null,{nodeQuery:'Person',defaultValue:1.0})
+YIELD sourceNodeId, targetNodeId, distance
+RETURN sourceNodeId, targetNodeId, distance
+
+// equivalente con cypher query, ma inutilmente più complessa:
+
+CALL algo.allShortestPaths.stream(null, {
+nodeQuery:'MATCH (n:Person) RETURN id(n) as id',
+relationshipQuery:'MATCH (n:Person)-[r]-(p:Person) RETURN id(n) as source, id(p) as target, 1 as weight',
+graph:'cypher', defaultValue:1.0})
+YIELD sourceNodeId, targetNodeId, distance
+RETURN sourceNodeId, targetNodeId, distance
+ORDER BY distance DESC
+
+
+// ===================
+// COMMUNITY DETECTION
+// ===================
+
+
+// TRIANGLE COUNT
+
+// Persone associate a crimini (o con conoscenti criminali) con il maggior numero di triangoli
+CALL algo.triangleCount.stream(
+'MATCH (p:Person)-[:KNOWS*0..1]-(:Person)-[:PARTY_TO]->(c:Crime) RETURN id(p) AS id',
+'MATCH (p1:Person)-[:KNOWS]-(p2:Person) RETURN id(p1) AS source, id(p2) AS target',
+{graph:'cypher'})
+YIELD nodeId, triangles
+MATCH (p:Person)
+WHERE ID(p) = nodeId AND
+triangles > 0
+RETURN p.name AS name, p.surname AS surname, p.nhs_no AS id, triangles
+ORDER BY triangles DESC
+LIMIT 5;
+
+// Relazioni triangolari di Philip Williamson e crimini connessi alle persone identificate
+MATCH (p1:Person {nhs_no: '337-28-4424', surname: 'Williamson'})-[k1:KNOWS]-(p2)-[k2:KNOWS]-(p3)-[k3:KNOWS]-(p1)
+WITH *
+MATCH (person)-[pt:PARTY_TO]->(crime) WHERE person IN[p1, p2, p3]
+RETURN *
+
+// Numero di crimini commessi dalla banda di Williamson per tipologia
+MATCH (p1:Person {nhs_no: '337-28-4424', surname: 'Williamson'})-[k1:KNOWS]-(p2)-[k2:KNOWS]-(p3)-[:KNOWS]-(p1)
+WITH *
+MATCH (person)-[pt:PARTY_TO]->(c:Crime) WHERE person IN[p1, p2, p3]
+WITH c
+RETURN c.type AS Tipologia, count(*) AS No
+
+// Relazioni triangolari via social tra criminali
+CALL algo.triangleCount.stream(
+'MATCH (p:Person)-[*0..1]-(:Person)-[:PARTY_TO]->(c:Crime) RETURN id(p) AS id',
+'MATCH (p1:Person)-[:KNOWS_PHONE|:KNOWS_SOCIAL]-(p2:Person) RETURN id(p1) AS source, id(p2) AS target',
+{graph:'cypher'})
+YIELD nodeId, triangles
+MATCH (p:Person)
+WHERE ID(p) = nodeId AND
+triangles > 0
+RETURN p.name AS name, p.surname AS surname, p.nhs_no AS id, triangles
+ORDER BY triangles DESC
+LIMIT 5;
+
+MATCH (:Person)-[:KNOWS_SN|:KNOWS_PHONE]-(:Person)
+RETURN count(*)
+
+MATCH (p1)-[:KNOWS_SN|:KNOWS_PHONE]-(p2)-[:KNOWS_SN|:KNOWS_PHONE]-(p3)-[:KNOWS_SN|:KNOWS_PHONE]-(p1)
+RETURN count(*)
+
+
+// LOUVAIN METHOD
+
+// Identificazione di comunità con algoritmo di Louvain
+CALL algo.louvain('Person', null, {write:true, writeProperty:'community'})
+YIELD nodes, communityCount
+
+// Visualizzazione comunità nel gruppo identificato precedentemente con Triangle Count
+MATCH (p1:Person {nhs_no: '337-28-4424', surname: 'Williamson'})-[k1:KNOWS]-(p2)-[k2:KNOWS]-(p3)-[k3:KNOWS]-(p1)
+WITH *
+MATCH (person)-[pt:PARTY_TO]->(crime) WHERE person IN[p1, p2, p3]
+RETURN DISTINCT person.name, person.surname, person.community
+
+// Persone legate ad un crimine e conoscenti della comunità 6
+MATCH (p1:Person)-[*0..1]->(p2:Person)-[:PARTY_TO]->(c:Crime)
+WHERE p1.community = 6 AND p2.community = 6
+RETURN *
+
+// Nomi e cognomi delle persone individuate dalla query precedente
+MATCH (p1:Person)-[*0..1]->(p2:Person)-[:PARTY_TO]->(c:Crime)
+WHERE p1.community = 6 AND p2.community = 6
+WITH *
+MATCH (p:Person)
+WHERE p IN [p1, p2]
+RETURN DISTINCT p.name, p.surname
+
+
+// ===================
+// CENTRALITY ANALYSIS
+// ===================
+
+
+// BETWEENNESS CENTRALITY
+
+// Dato un sottografo di persone correlate a crimini fino a 2 gradi di separazione,
+// trova gli individui con betweenness centrality maggiore
+CALL algo.betweenness.stream(
+'MATCH (p:Person)-[:KNOWS*0..2]-(:Person)-[:PARTY_TO]->(c:Crime) RETURN id(p) AS id',
+'MATCH (p1:Person)-[:KNOWS]-(p2:Person) RETURN id(p1) AS source, id(p2) AS target',
+{graph:'cypher', direction: 'both'})
+YIELD nodeId, centrality
+MATCH (p:Person)
+WHERE ID(p) = nodeId
+RETURN p.name AS name, p.surname AS surname, p.nhs_no AS id, toInteger(centrality) AS score
+ORDER BY centrality DESC
+LIMIT 10;
+
+// Visualizza il grafo delle conoscenze di Annie Duncan e i crimini commessi dalle 
+// persone considerate
+MATCH (:Person {nhs_no: '863-96-9468', surname: 'Duncan'})-[:KNOWS*0..2]-(p2:Person)
+OPTIONAL MATCH (p2)-[:PARTY_TO]->(c:Crime)
+RETURN *
+
+// DEGREE CENTRALITY
+
+// Identifica le persone con degree centrality più alta in un sottografo
+CALL algo.degree.stream(
+'MATCH (p:Person)-[:KNOWS*0..1]-(:Person)-[:PARTY_TO]->(c:Crime) RETURN id(p) AS id',
+'MATCH (p1:Person)-[:KNOWS]-(p2:Person) RETURN id(p1) AS source, id(p2) AS target',
+{graph:'cypher', direction: 'both'})
+YIELD nodeId, score
+MATCH (p:Person)
+WHERE ID(p) = nodeId
+RETURN p.name AS name, p.surname AS surname, p.nhs_no AS id, toInteger(score) AS score
+ORDER BY score DESC
+LIMIT 10;
+
+// Visualizza la rete di contatti di Montgomery
+MATCH (:Person {nhs_no: '351-83-4608', surname: 'Montgomery'})-[:KNOWS*0..1]-(p2:Person)
+OPTIONAL MATCH (p2)-[:PARTY_TO]->(c:Crime)
+RETURN *
+
+// Restringiamo il grafo considerato alle persone partecipi di un crimine
+CALL algo.degree.stream(
+'MATCH (p:Person)-[:PARTY_TO]->(c:Crime) RETURN id(p) AS id',
+'MATCH (p1:Person)-[:KNOWS]-(p2:Person) RETURN id(p1) AS source, id(p2) AS target',
+{graph:'cypher', direction: 'both'})
+YIELD nodeId, score
+MATCH (p:Person)
+WHERE ID(p) = nodeId
+RETURN p.name AS name, p.surname AS surname, p.nhs_no AS id, toInteger(score) AS score
+ORDER BY score DESC
+LIMIT 10;
