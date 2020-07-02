@@ -1,6 +1,6 @@
 # Big Data Analytics Projects
 
-Questo file è un breve README con le istruzioni per creare l'environment in cui eseguire i progetti.
+Questo file è un breve README con le istruzioni per creare l'environment con le dipendenze necessarie per eseguire i progetti.
 
 ## Setup Anaconda environment
 
