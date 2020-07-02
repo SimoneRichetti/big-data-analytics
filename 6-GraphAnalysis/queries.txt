@@ -66,7 +66,7 @@ RETURN c.type AS Tipologia, count(*) AS No
 // Relazioni triangolari via social tra criminali
 CALL algo.triangleCount.stream(
 'MATCH (p:Person)-[*0..1]-(:Person)-[:PARTY_TO]->(c:Crime) RETURN id(p) AS id',
-'MATCH (p1:Person)-[:KNOWS_PHONE|:KNOWS_SOCIAL]-(p2:Person) RETURN id(p1) AS source, id(p2) AS target',
+'MATCH (p1:Person)-[:KNOWS_PHONE|:KNOWS_SN]-(p2:Person) RETURN id(p1) AS source, id(p2) AS target',
 {graph:'cypher'})
 YIELD nodeId, triangles
 MATCH (p:Person)
