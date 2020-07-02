@@ -20,7 +20,7 @@ Nei sistemi più semplici, come ad esempio in Aerospike, le chiavi sono stringhe
 
 Molti sistemi che implementano il modello chiave-valore fanno utilizzo anche di una chiave aggiuntiva, detta \textit{sort key}, la quale viene utilizzata per ordinare i \textit{record} all'interno della partizione.
 
-È importante notare come, fatta eccezione per la \textit{partition key} ed eventualmente la \textit{sorting key}, non esiste uno schema fisso per i \textit{record}. Ogni oggetto ha uno schema a sé stante, ovvero diversi oggetti possono presentare diversi campi. Questo permette un grande risparmio di memoria, poiché non si devono salvare \textit{placeholder} o occupare memoria per campi che un oggetto non utilizza, al contrario di ciò che avviene nei database relazionali, e permette anche una minore complessità dal punto di vista della gestione dei dati e della velocità delle operazioni su di essi.
+È importante notare come, fatta eccezione per la \textit{partition key} ed eventualmente la \textit{sorting key}, non esista uno schema fisso per i \textit{record}. Ogni oggetto ha uno schema a sé stante, ovvero diversi oggetti possono presentare diversi campi. Questo permette un grande risparmio di memoria, poiché non si devono salvare \textit{placeholder} o occupare memoria per campi che un oggetto non utilizza, al contrario di ciò che avviene nei database relazionali, e permette anche una minore complessità dal punto di vista della gestione dei dati e della velocità delle operazioni su di essi.
 
 Questa flessibilità nello schema, però, rende limitato il numero ed il tipo di operazioni che si possono svolgere su questi dati. Per maggiori dettagli riguardo a questo si veda la sezione \ref{ops}.
 
